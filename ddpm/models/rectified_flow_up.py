@@ -4,6 +4,7 @@ import torch
 from torch import nn
 from torchvision.utils import save_image
 from tqdm import tqdm, trange
+import torch.nn.functional as F
 
 
 class RectifiedFlow(nn.Module):
@@ -23,29 +24,6 @@ class RectifiedFlow(nn.Module):
         zt = ti * z1 + (1. - ti) * z0
         target = z1 - z0
         return zt, ti.squeeze(-1).squeeze(-1), target
-
-    # def p_x(self, x, ema):
-    #     z0 = torch.randn_like(x)
-    #     z1 = x
-    #     v = z1 - z0
-    #
-    #     # N = 8
-    #     # eps = 1e-4
-    #     # ts = (torch.arange(eps, N) / (N - 1))
-    #     # idx = torch.randint(0, N - 1, size=(len(v),))
-    #     # t1 = ts[idx].to(x.device)
-    #     # t2 = ts[idx + 1].to(x.device)
-    #     t2 = torch.rand(z0.size(0), 1, device=x.device)
-    #     t1 = torch.rand_like(t2) * t2
-    #
-    #     z1 = v * t1.view(-1, 1, 1, 1) + z0
-    #
-    #     with torch.no_grad():
-    #         z2 = v * t2.view(-1, 1, 1, 1) + z0
-    #         v2 = self(z2, t2.view(-1, 1))
-    #         target = v2 + t1.view(-1, 1, 1, 1) * (v - v2)
-    #
-    #     return z1, t1.view(-1, 1), target
 
     def t(self, ti):
         return ti.expand(ti.shape[0], self.embedding_size)
@@ -68,19 +46,34 @@ class RectifiedFlow(nn.Module):
             rg = range(N)
         for i in rg:
             ti = torch.ones(batch_size, 1, device=z0.device, dtype=torch.float) * i / N
-            pred = self.forward(z, ti)
-            z = z + pred * dt
+
+            low_z = z[..., ::2, ::2]
+            low_v = self.forward(low_z, ti)
+            low_v = F.interpolate(low_v, scale_factor=2, mode='nearest')
+
+            low_z = z + low_v * dt
+            high_v = self.forward(low_z, ti)
+            high_v_s = high_v[..., ::2, ::2]
+            high_v_s = F.interpolate(high_v_s, scale_factor=2, mode='nearest')
+            tol = high_v - high_v_s
+
+            v = low_v + tol
+
+            z = z + v * dt
 
         return z
 
     @torch.no_grad()
-    def sample(self, path=None, n=4, z_samples=None, t0=0, device="cuda"):
+    def sample(self, path=None, n=4, z_samples=None, t0=0, device="cuda", r=1):
         if z_samples is None:
             z_samples = torch.randn(n ** 2, 3, self.img_size, self.img_size, device=device)
         else:
             z_samples = z_samples.copy()
-        if self.resolution_multiplier != 1:
-            z_samples = torch.nn.functional.interpolate(z_samples, scale_factor=self.resolution_multiplier, mode='nearest')
+        if r != 1:
+            z_samples_r = torch.randn(n ** 2, 3, self.img_size * r, self.img_size * r, device=device)
+            z_samples_r[..., ::r, ::r] = z_samples
+            z_samples = z_samples_r
+
         z_samples = self.sample_ode(z_samples, self.N, True)
         x_samples = torch.clip(z_samples, -1, 1)
         if path is None:

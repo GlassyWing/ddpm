@@ -63,7 +63,7 @@ class Unet(nn.Module):
         decoder_blocks = OrderedDict()
         for i, scale in enumerate(scales[::-1]):
             if i >= skip_pooling:
-                decoder_blocks[f'up_block_{i}'] = Upsample(cur_c, image_size=min_img_size, dilation=1)
+                decoder_blocks[f'up_block_{i}'] = Upsample(cur_c, image_size=min_img_size, dilation=dilation)
                 min_img_size *= 2
             for j in range(n_block):
                 decoder_blocks[f'dec_block_{i * n_block + j}'] = ResidualBlock(*chs_inv[i * n_block + j][::-1],
@@ -75,7 +75,7 @@ class Unet(nn.Module):
             if i < self.attn_apply_level:
                 decoder_blocks[f'attn_dec_block_{i * n_block}'] = AttentionBlock(cur_c, 8, cur_c // 8,
                                                                                  resolution_multiplier=resolution_multiplier)
-        decoder_blocks[f'to_rgb'] = ScaleActConv(cur_c, out_c, dilation=dilation)
+        decoder_blocks[f'to_rgb'] = ScaleActConv(cur_c, out_c, dilation=dilation, offset=0, act='tanh')
         self.decoder_blocks = nn.ModuleDict(decoder_blocks)
 
     def forward(self, x, t=None):

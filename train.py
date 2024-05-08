@@ -10,7 +10,6 @@ from ddpm.models import DDPM, Unet, DDIM
 from ddpm.models.rectified_flow import RectifiedFlow
 from ddpm.trainer import Trainer
 from ddpm.utils import weights_init
-from ddpm.models.proxy import ModelProxy
 
 torch.backends.cudnn.benchmark = True
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -81,7 +80,7 @@ if __name__ == '__main__':
     if opt.pretrained_weights is None:
         diffusion = diffusion.apply(weights_init())
 
-    diffusion.cuda(0)
+    diffusion.cuda(1)
 
     trainer = Trainer(
         diffusion,
@@ -91,6 +90,8 @@ if __name__ == '__main__':
         ema_decay=0.995,
         save_and_sample_every=500,
         num_workers=opt.n_cpu,
-        accumulation_steps=accum,
+        accu_min_steps=accum,
+        accu_max_steps=32,
+        accu_scheduler_epochs=5,
     )
-    trainer.train(dataloader, rbls=False)
+    trainer.train(dataloader)

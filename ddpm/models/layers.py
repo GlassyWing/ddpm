@@ -14,7 +14,7 @@ __all__ = ["GroupNormCustom", "ResidualBlock", "Downsample", "Upsample",
 
 
 class SELayer(nn.Module):
-    def __init__(self, channel, reduction=3):
+    def __init__(self, channel, reduction=3, offset=1):
         super(SELayer, self).__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Sequential(
@@ -23,13 +23,14 @@ class SELayer(nn.Module):
             nn.Linear(channel // reduction, channel, bias=False),
             nn.Sigmoid()
         )
+        self.offset = offset
 
     def forward(self, x):
         b, c, _, _ = x.size()
         y_mu = self.avg_pool(x)
         y = y_mu.view(b, c)
         y = self.fc(y).view(b, c, 1, 1)
-        return (x + 1.0) * y.expand_as(x)
+        return (x + self.offset) * y.expand_as(x)
 
 
 class GroupNormCustom(nn.Module):
@@ -41,6 +42,14 @@ class GroupNormCustom(nn.Module):
 
     def forward(self, x):
         return self.gn(x)
+
+
+def calculate_out_padding(iH, iW, kernel_size, stride, padding, dilation=1):
+    H, W = iH * 2, iW * 2
+
+    OPH = H - int((iH - 1) * stride + dilation * (kernel_size - 1) - 2 * padding) - 1
+    OPW = W - int((iW - 1) * stride + dilation * (kernel_size - 1) - 2 * padding) - 1
+    return OPH, OPW
 
 
 def create_divisor(iH, iW, kernel_size, stride, padding, dilation=1):
@@ -70,8 +79,9 @@ class Upsample(nn.Module):
 
         self.kernel_size = 3
         self.stride = 2
+        self.ratio = dilation
 
-        self.dilation = dilation
+        self.dilation = 1
         self.padding = int((self.kernel_size - 1) * self.dilation / 2)
 
         if image_size is not None:
@@ -82,7 +92,8 @@ class Upsample(nn.Module):
                                           stride=self.stride,
                                           padding=self.padding,
                                           dilation=self.dilation,
-                                          output_padding=(OPH, OPW))
+                                          output_padding=(OPH, OPW),
+                                          bias=False)
             self.register_buffer("divisor", divisor)
             self._conv_t = True
         else:
@@ -96,6 +107,8 @@ class Upsample(nn.Module):
     def forward(self, x):
         x = self.scale(x)
         x = self.act(x)
+        if self.ratio != 1:
+            x = F.interpolate(x, scale_factor=1 / self.ratio, mode='nearest')
         x = self.upsample(x)
         if self._conv_t:
             if self.divisor.shape[-2:] != x.shape[-2:]:
@@ -103,6 +116,8 @@ class Upsample(nn.Module):
                                               self.kernel_size, self.stride,
                                               self.padding, self.dilation)[0].to(x.device)
             x = x / self.divisor
+        if self.ratio != 1:
+            x = F.interpolate(x, scale_factor=self.ratio, mode='nearest')
         return x
 
 
@@ -111,11 +126,18 @@ class ScaleActConv(nn.Module):
     def __init__(self, dim, dim_out=None, kernel_size=3,
                  padding=1,
                  stride=1, bias=False, reduction=3,
-                 dilation = 1,
+                 dilation=1,
+                 offset=1,
+                 act='silu',
                  *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.scale = SELayer(dim, reduction)
-        self.act = nn.SiLU(inplace=True)
+        self.scale = SELayer(dim, reduction, offset)
+        if act == 'silu':
+            self.act = nn.SiLU(inplace=True)
+        elif act == 'tanh':
+            self.act = nn.Tanh()
+        else:
+            self.act = nn.ReLU(inplace=True)
         self.conv = nn.Conv2d(dim, default(dim_out, dim), kernel_size,
                               padding=int(kernel_size - 1) * dilation // 2,
                               stride=stride,
@@ -141,11 +163,11 @@ class ResidualBlock(nn.Module):
         self.with_time_emb = with_time_emb
 
         self.map = nn.Conv2d(in_c, out_c, kernel_size=(1, 1), bias=False)
-        self.block1 = ScaleActConv(out_c, out_c, dilation=dilation)
-        self.block2 = ScaleActConv(out_c, out_c, dilation=dilation)
+        self.block1 = ScaleActConv(out_c, out_c, dilation=dilation, bias=True)
+        self.block2 = ScaleActConv(out_c, out_c, dilation=dilation, bias=True)
 
         if with_time_emb:
-            self.dense = nn.Conv2d(emb_dim, out_c, kernel_size=(1, 1), bias=False)
+            self.dense = nn.Conv2d(emb_dim, out_c, kernel_size=(1, 1), bias=True)
 
         self.out_c = out_c
 
@@ -195,7 +217,7 @@ class AttentionBlock(nn.Module):
             self.num_heads = channels // num_head_channels
 
         self.norm = GroupNormCustom(min(4, channels // 4), channels)
-        self.qkv = nn.Conv1d(channels, channels * 3, 1)
+        self.qkv = nn.Conv1d(channels, channels * 3, 1, bias=False)
         self.attn = QKVAttention(num_heads)
         self.proj_out = nn.Conv1d(channels, channels, 1)
 
