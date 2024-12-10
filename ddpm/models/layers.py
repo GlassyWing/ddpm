@@ -4,17 +4,18 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn import Parameter, init
 
+from ddpm.models.min_gru import MinGRUBlock, RMSNorm
 from ddpm.models.pos_embs.rotary import Rotary2D, apply_rotary_position_embeddings
 from ddpm.utils import default
 
 import math
 
 __all__ = ["GroupNormCustom", "ResidualBlock", "Downsample", "Upsample",
-           "AttentionBlock", "QKVAttention", "ScaleActConv"]
+           "AttentionBlock", "QKVAttention", "ScaleActConv", "LinearAttention"]
 
 
 class SELayer(nn.Module):
-    def __init__(self, channel, reduction=3, offset=1):
+    def __init__(self, channel, reduction=3, offset=1, only_y=False):
         super(SELayer, self).__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Sequential(
@@ -24,12 +25,15 @@ class SELayer(nn.Module):
             nn.Sigmoid()
         )
         self.offset = offset
+        self.only_y = only_y
 
     def forward(self, x):
         b, c, _, _ = x.size()
         y_mu = self.avg_pool(x)
         y = y_mu.view(b, c)
         y = self.fc(y).view(b, c, 1, 1)
+        if self.only_y:
+            return y
         return (x + self.offset) * y.expand_as(x)
 
 
@@ -181,6 +185,45 @@ class ResidualBlock(nn.Module):
         if self.with_time_emb:
             x = x + self.dense(t.unsqueeze(-1).unsqueeze(-1))
         x = self.block2(x)
+        return xi + x
+
+class LinearAttention(nn.Module):
+    
+    def __init__(self, channels, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.channels = channels
+        
+        self.l_scan = MinGRUBlock(channels, has_ffn=True)
+        self.r_scan = MinGRUBlock(channels, has_ffn=True)
+        self.t_scan = MinGRUBlock(channels, has_ffn=True)
+        self.b_scan = MinGRUBlock(channels, has_ffn=True)
+        
+        self.merge =  nn.Conv2d(channels * 4, channels, kernel_size=1, bias=False)
+        
+    def forward(self, x):
+        """
+        Args:
+            x: shape of (B, C, H, W)
+        """
+        B, C, H, W = x.shape
+        xi = x
+        x = x.permute(0, 2, 3, 1).reshape(-1, W, C) # (B * H, W, C)
+        x_l = self.l_scan(x)[0] # (B * H, W, C)
+        x_r = self.r_scan(torch.flip(x, dims=[1]))[0] # (B * H, W, C)
+        
+        # (B * H, W, C) -> (B, W, H, C) -> (B * W, H, C)
+        x_l = x_l.reshape(B, H, W, C).permute(0, 2, 1, 3).reshape(-1, H, C)
+        x_r = x_r.reshape(B, H, W, C).permute(0, 2, 1, 3).reshape(-1, H, C)
+        
+        x_lt = self.t_scan(x_l)[0] # (B * W, H, C)
+        x_lb = self.b_scan(torch.flip(x_l, dims=[1]))[0] # (B * W, H, C)
+        x_rt = self.t_scan(x_r)[0] # (B * W, H, C)
+        x_rb = self.b_scan(torch.flip(x_r, dims=[1]))[0] # (B * W, H, C)
+        x = torch.cat([x_lt, x_lb, x_rt, x_rb], dim=-1) # (B * W, H, 4 * C)
+        
+        x = x.reshape(B, W, H, -1).permute(0, 3, 2, 1) # (B, 4 * C, H, W)
+        x = self.merge(x) # (B, C, H, W)
+        
         return xi + x
 
 

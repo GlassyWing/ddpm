@@ -20,7 +20,7 @@ if __name__ == '__main__':
                  resolution_multiplier=resolution_multiplier)
     # model.load_state_dict(torch.load("RectifiedFlow_ckpt_1_0.pth", map_location="cpu"))
     # print(model.state_dict())
-    model.load_state_dict(torch.load("experiments/checkpoints/sample_ckpt_109_957000_a64.pth", map_location="cpu"))
+    model.load_state_dict(torch.load("experiments/checkpoints/sample_ckpt_46_407000_a128.png", map_location="cpu"))
     diffusion = RectifiedFlow(model, img_size, T, emb_dim, stride=stride,  resolution_multiplier=resolution_multiplier)
     diffusion.to("cuda:0")
     diffusion = diffusion.eval()

@@ -46,8 +46,7 @@ class Unet(nn.Module):
                 encoder_blocks[f'enc_block_{i * n_block + j}'] = block
 
             if i >= self.attn_apply_level:
-                encoder_blocks[f'attn_enc_block_{i * n_block}'] = AttentionBlock(cur_c, 8, cur_c // 8,
-                                                                                 resolution_multiplier=resolution_multiplier)
+                encoder_blocks[f'attn_enc_block_{i * n_block}'] = LinearAttention(cur_c)
 
             if min_img_size > min_pixel:
                 encoder_blocks[f'down_block_{i}'] = Downsample(cur_c, image_size=min_img_size, dilation=dilation)
@@ -73,8 +72,7 @@ class Unet(nn.Module):
                 cur_c = chs_inv[i * n_block + j][0]
 
             if i < self.attn_apply_level:
-                decoder_blocks[f'attn_dec_block_{i * n_block}'] = AttentionBlock(cur_c, 8, cur_c // 8,
-                                                                                 resolution_multiplier=resolution_multiplier)
+                decoder_blocks[f'attn_dec_block_{i * n_block}'] = LinearAttention(cur_c)
         decoder_blocks[f'to_rgb'] = ScaleActConv(cur_c, out_c, dilation=dilation, offset=0, act='tanh')
         self.decoder_blocks = nn.ModuleDict(decoder_blocks)
 

@@ -29,19 +29,21 @@ if __name__ == '__main__':
                         help="Sampler type [ddpm/ddim/rflow], Default, `rflow`")
     parser.add_argument("--stride", "-s", type=int, default=1, help="sample stride for ddim")
     parser.add_argument("--num_steps", "-n", type=int, default=1000, help="sample times. Default, 1000")
-    parser.add_argument("--accum", "-a", type=int, default=1, help="accumulation steps, Default, 1.")
+    parser.add_argument("--accum_min", "-i", type=int, default=1, help="accumulation min steps, Default, 1.")
+    parser.add_argument("--accum_max", "-a", type=int, default=128, help="accumulation max steps, Default, 128.")
 
     opt = parser.parse_args()
     img_size = 128
     scales = [1, 1,
               2, 2,
               4, 4]
-    emb_dim = 64
-    attn_apply_level = 3
+    emb_dim = 128
+    attn_apply_level = 2
     T = opt.num_steps
     sampler = opt.type
     stride = opt.stride
-    accum = opt.accum
+    accum_min = opt.accum_min
+    accum_max = opt.accum_max
 
     tfms = transforms.Compose([
         transforms.RandomHorizontalFlip(),
@@ -56,16 +58,6 @@ if __name__ == '__main__':
                             )
 
     model = Unet(3, img_size, scales, emb_dim=emb_dim, attn_apply_level=attn_apply_level)
-    if opt.pretrained_weights is not None:
-        pretrained_dict = torch.load(opt.pretrained_weights, map_location="cpu")
-        model_dict = model.state_dict()
-
-        # Fiter out unneccessary keys
-        filtered_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict and v.shape == model_dict[k].shape}
-        model_dict.update(filtered_dict)
-        model.load_state_dict(model_dict)
-        print("load pretrained weights!")
-
     print(model)
 
     if sampler == "ddpm":
@@ -80,18 +72,22 @@ if __name__ == '__main__':
     if opt.pretrained_weights is None:
         diffusion = diffusion.apply(weights_init())
 
-    diffusion.cuda(1)
+    diffusion.cuda(0)
 
     trainer = Trainer(
         diffusion,
         train_batch_size=opt.batch_size,
-        train_lr=1e-3,
+        train_lr=2e-4,
         train_num_epochs=opt.epochs,
         ema_decay=0.995,
         save_and_sample_every=500,
         num_workers=opt.n_cpu,
-        accu_min_steps=accum,
-        accu_max_steps=32,
-        accu_scheduler_epochs=5,
+        accu_min_steps=accum_min,
+        accu_max_steps=accum_max,
+        accu_scheduler_epochs=8,
     )
+    
+    if opt.pretrained_weights is not None:
+        trainer.load(opt.pretrained_weights)
+    
     trainer.train(dataloader)
