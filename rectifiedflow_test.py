@@ -26,8 +26,8 @@ if __name__ == '__main__':
     resolution_multiplier = 1
     generator_resolution = img_size * resolution_multiplier
     scales = [1, 1, 2, 2, 4, 4]
-    emb_dim = 64
-    T = 100
+    emb_dim = 128
+    T = 55
     stride = 4
     attn_apply_level = 2  # attn resolution will be: (attn_apply_level + 1) ** 2
 
@@ -40,7 +40,7 @@ if __name__ == '__main__':
     last_ckpt = get_most_recent_file("experiments/checkpoints")
     # last_ckpt = "experiments\checkpoints\cat_sample_ckpt_21_186000_a4.pth"
     print(f"load ckpt: {last_ckpt}")
-    model.load_state_dict(torch.load(last_ckpt, map_location="cpu"))
+    model.load_state_dict(torch.load(last_ckpt, map_location="cpu")["model"])
     diffusion = RectifiedFlow(model, img_size, T, emb_dim, stride=stride, resolution_multiplier=resolution_multiplier)
     diffusion.to("cuda:0")
     diffusion = diffusion.eval()

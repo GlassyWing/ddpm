@@ -1,7 +1,7 @@
 import torch.nn.functional as F
 import torch
 from torch import nn
-from .pscan import pscan
+from .pscan import pscan, pscan_rev
 
 
 class FeedForward(nn.Module):
@@ -26,7 +26,10 @@ class RMSNorm(torch.nn.Module):
         super().__init__()
         self.eps = eps
         self.axis = axis
-        self.weight = nn.Parameter(torch.ones(dim))
+        if axis != -1:
+            self.weight = nn.Parameter(torch.ones(1, dim, 1, 1))
+        else:
+            self.weight = nn.Parameter(torch.ones(dim))
 
     def _norm(self, x):
         return x * torch.rsqrt(x.pow(2).mean(self.axis, keepdim=True) + self.eps)
@@ -38,12 +41,18 @@ class RMSNorm(torch.nn.Module):
 
 class MinGRUBlock(nn.Module):
 
-    def __init__(self, dim, hidden_dim=None, dropout=0.0, has_ffn=True):
+    def __init__(self, dim, hidden_dim=None, dropout=0.0, has_ffn=True, pre_norm=True, reverse=False):
         super().__init__()
         self.input_size = dim
         self.hidden_size = hidden_dim if hidden_dim is not None else dim
         self.dropout_p = dropout
         self.has_ffn = has_ffn
+        self.pre_norm = pre_norm
+        
+        if reverse:
+            self.scan_op = pscan_rev
+        else:
+            self.scan_op = pscan
 
         self.graph_gates = nn.Linear(
             self.input_size, self.hidden_size, bias=False
@@ -61,6 +70,7 @@ class MinGRUBlock(nn.Module):
                 dropout=self.dropout_p,
             )
         self.layer_norm = RMSNorm(self.input_size)
+        # self.layer_norm = nn.LayerNorm(self.input_size)
 
     def forward(self, inp, hx_prev=None):
         """
@@ -75,7 +85,10 @@ class MinGRUBlock(nn.Module):
         if hx_prev is not None:
             assert inp.shape == hx_prev.shape
 
-        norm_inp = self.layer_norm(inp)
+        if self.pre_norm:
+            norm_inp = self.layer_norm(inp)
+        else:
+            norm_inp = inp
 
         # (B, L, D)
         beta = torch.sigmoid(self.graph_gates(norm_inp))
@@ -90,9 +103,10 @@ class MinGRUBlock(nn.Module):
             # (B, 1, D)
             hx_next = a * hx_prev + x
         else:
-            hx_next = pscan(a, x)  # a * hx_prev + x => (1 - beta) * hx_prev + beta * hx_hat
+            hx_next = self.scan_op(a, x)  # a * hx_prev + x => (1 - beta) * hx_prev + beta * hx_hat
 
-        inp = inp + hx_next
+        # inp = inp + hx_next
+        inp = hx_next
         if self.has_ffn:
             out = inp + self.ff(self.ffn_norm(inp))
         else:

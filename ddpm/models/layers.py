@@ -187,18 +187,42 @@ class ResidualBlock(nn.Module):
         x = self.block2(x)
         return xi + x
 
+class LinearMLP(nn.Module):
+    
+    def __init__(self, dim: int, hidden_dim: int=None, out_dim: int=None, multiple_of: int=1, dropout: float=0):
+        super().__init__()
+        if hidden_dim is None:
+            hidden_dim = 4 * dim
+            hidden_dim = int(2 * hidden_dim / 3)
+            hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+        if out_dim is None:
+            out_dim = dim
+        self.w1 = nn.Conv2d(dim, hidden_dim, kernel_size=1, bias=False)
+        self.w2 = nn.Conv2d(hidden_dim, out_dim, kernel_size=1, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        # return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
+        return self.dropout(self.w2(F.silu(self.w1(x))))
+
 class LinearAttention(nn.Module):
     
     def __init__(self, channels, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.channels = channels
         
-        self.l_scan = MinGRUBlock(channels, has_ffn=True)
-        self.r_scan = MinGRUBlock(channels, has_ffn=True)
-        self.t_scan = MinGRUBlock(channels, has_ffn=True)
-        self.b_scan = MinGRUBlock(channels, has_ffn=True)
+        self.attn_norm = RMSNorm(channels, axis=-1)
         
-        self.merge =  nn.Conv2d(channels * 4, channels, kernel_size=1, bias=False)
+        self.l_scan = MinGRUBlock(channels, has_ffn=False, pre_norm=False)
+        self.r_scan = MinGRUBlock(channels, has_ffn=False, pre_norm=False, reverse=True)
+        self.t_scan = MinGRUBlock(channels, has_ffn=False, pre_norm=False)
+        self.b_scan = MinGRUBlock(channels, has_ffn=False, pre_norm=False, reverse=True)
+        
+        num_repeat = 1
+        
+        self.norm = RMSNorm(channels * num_repeat, axis=1) # mlp pre_norm
+        self.proj = nn.Linear(channels * 4, channels, bias=False)
+        self.mlp = LinearMLP(channels * num_repeat, out_dim=channels) # pre_norm
         
     def forward(self, x):
         """
@@ -208,23 +232,33 @@ class LinearAttention(nn.Module):
         B, C, H, W = x.shape
         xi = x
         x = x.permute(0, 2, 3, 1).reshape(-1, W, C) # (B * H, W, C)
+        x = self.attn_norm(x)
+        
         x_l = self.l_scan(x)[0] # (B * H, W, C)
-        x_r = self.r_scan(torch.flip(x, dims=[1]))[0] # (B * H, W, C)
+        x_r = self.r_scan(x)[0] # (B * H, W, C)
         
         # (B * H, W, C) -> (B, W, H, C) -> (B * W, H, C)
         x_l = x_l.reshape(B, H, W, C).permute(0, 2, 1, 3).reshape(-1, H, C)
         x_r = x_r.reshape(B, H, W, C).permute(0, 2, 1, 3).reshape(-1, H, C)
         
         x_lt = self.t_scan(x_l)[0] # (B * W, H, C)
-        x_lb = self.b_scan(torch.flip(x_l, dims=[1]))[0] # (B * W, H, C)
+        x_lb = self.b_scan(x_l)[0] # (B * W, H, C)
+        
         x_rt = self.t_scan(x_r)[0] # (B * W, H, C)
-        x_rb = self.b_scan(torch.flip(x_r, dims=[1]))[0] # (B * W, H, C)
+        x_rb = self.b_scan(x_r)[0] # (B * W, H, C)
+        
         x = torch.cat([x_lt, x_lb, x_rt, x_rb], dim=-1) # (B * W, H, 4 * C)
+        x = self.proj(x)
+        # x = torch.stack([x_lt, x_lb, x_rt, x_rb], dim=-1) # (B * W, H, C, 4)
+        # x = torch.sum(x, dim=-1) # (B * W, H, C)
         
-        x = x.reshape(B, W, H, -1).permute(0, 3, 2, 1) # (B, 4 * C, H, W)
-        x = self.merge(x) # (B, C, H, W)
+        x = x.reshape(B, W, H, -1).permute(0, 3, 2, 1) # (B, C, H, W)
+        # x = x + attn(attn_norm(x))
+        x = self.norm(xi + x) # (B, C, H, W)
+        # x = x + mlp(norm(x))
+        x = x + self.mlp(x)  # (B, C, H, W)
         
-        return xi + x
+        return x
 
 
 class QKVAttention(nn.Module):

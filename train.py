@@ -23,7 +23,7 @@ if __name__ == '__main__':
     parser.add_argument("--epochs", type=int, default=10000, help="number of epochs.")
     parser.add_argument("--batch_size", "-b", type=int, default=32, help="size of each sample batch")
     parser.add_argument("--pretrained_weights", "-p", type=str, help="if specified starts from checkpoint model")
-    parser.add_argument("--n_cpu", type=int, default=8, help="number of cpu threads to use during batch generation")
+    parser.add_argument("--n_cpu", type=int, default=1, help="number of cpu threads to use during batch generation")
     parser.add_argument("--name", type=str, default="", help="experiment name")
     parser.add_argument("--type", "-t", type=str, default="rflow",
                         help="Sampler type [ddpm/ddim/rflow], Default, `rflow`")
@@ -57,8 +57,7 @@ if __name__ == '__main__':
                             persistent_workers=True,
                             )
 
-    model = Unet(3, img_size, scales, emb_dim=emb_dim, attn_apply_level=attn_apply_level)
-    print(model)
+    model = Unet(3, img_size, scales, emb_dim=emb_dim, attn_apply_level=attn_apply_level, min_pixel=4)
 
     if sampler == "ddpm":
         diffusion = DDPM(model, img_size, T, emb_dim)

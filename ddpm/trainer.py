@@ -3,10 +3,24 @@ from copy import deepcopy
 
 import torch
 import os
+import math
 
 from tqdm import tqdm
 from .utils import update_average
 from torch.cuda.amp import autocast, GradScaler
+
+def cleanup_directory(directory, keep_count=5):
+    # List all files in the directory
+    files = [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
+    
+    # Sort files by modification time, newest first
+    files_sorted = sorted(files, key=lambda x: os.path.getmtime(os.path.join(directory, x)), reverse=True)
+    
+    # Delete files beyond the keep count
+    for file in files_sorted[keep_count:]:
+        file_path = os.path.join(directory, file)
+        print('Deleting:', file_path)
+        os.remove(file_path)
 
 class Trainer:
 
@@ -20,13 +34,14 @@ class Trainer:
                  save_and_sample_every=100,
                  accumulation_steps=2,
                  accu_scheduler_epochs=5,
-                 accu_min_steps=8,
-                 accu_max_steps=64,
+                 accu_min_steps=1,
+                 accu_max_steps=8,
+                 keep_count=5
                  ):
         self.sampler = sampler
         self.train_batch_size = train_batch_size
         self.train_init_lr = train_lr
-        self.train_lr = self.train_init_lr / accumulation_steps
+        self.train_lr = self.train_init_lr
         self.train_num_epochs = train_num_epochs
         self.ema_decay = ema_decay
         self.num_workers = num_workers
@@ -36,15 +51,17 @@ class Trainer:
         self.accu_scheduler_epochs = accu_scheduler_epochs
         self.accu_max_steps = accu_max_steps
         self.accu_min_steps = accu_min_steps
+        
+        self.keep_count = keep_count
 
         self.sample_path = os.path.join("experiments", exp_name, "outputs")
         self.checkpoint_path = os.path.join("experiments", exp_name, "checkpoints")
         os.makedirs(self.checkpoint_path, exist_ok=True)
         os.makedirs(self.sample_path, exist_ok=True)
 
-        self.sampler_shadow = deepcopy(sampler)
+        # self.sampler_shadow = deepcopy(sampler)
         self.ema_updater = update_average
-        update_average(self.sampler_shadow, sampler, beta=0.)
+        # update_average(self.sampler_shadow, sampler, beta=0.)
 
         self.device = next(self.sampler.parameters()).device
         
@@ -85,29 +102,35 @@ class Trainer:
             self.sampler.zero_grad(set_to_none=True)
 
             with tqdm(train_dataloader, initial=self.idx) as train_bar:
-                for idx, x_real in enumerate(train_bar, start=self.idx):
+                idx = self.idx
+                for x_real in train_bar:
 
                     # time.sleep(0.35)
                     x_real = x_real.to(self.device)
 
                     with autocast():
-                        noise_images, steps, noise = self.sampler.p_x(x_real, self.sampler_shadow)
+                        noise_images, steps, noise = self.sampler.p_x(x_real, None)
                         denoise = self.sampler(noise_images, steps)
                         loss = torch.sum((denoise - noise) ** 2, dim=[1, 2, 3], keepdim=True).sum()
 
-                    scaler.scale(loss).backward()
+                    scaled_loss = scaler.scale(loss)
+                    scaled_loss.backward()
+                    # loss.backward()
 
                     if (step + 1 - last_log_steps) % self.accumulation_steps == 0:
                         scaler.step(self.optimizer)
                         scaler.update()
+                        # self.optimizer.step()
                         self.sampler.zero_grad(set_to_none=True)
 
                         # self.ema_updater(self.sampler_shadow, self.sampler, beta=self.ema_decay)
                         # scheduler.step()
-
-                    train_bar.set_description(f"[{epoch}/{self.train_num_epochs}] "
-                                              f"loss: {loss.item():.4f} ")
+                    
+                    idx += 1
                     self.idx = idx
+
+                    train_bar.set_description(f"[{epoch}/{self.train_num_epochs}] [{idx}/{len(train_dataloader)}] "
+                                              f"loss: {loss.item():.4f} ")
                     
                     step += 1
                     self.step = step
@@ -122,12 +145,16 @@ class Trainer:
                         self.save(f"{self.checkpoint_path}/sample_ckpt_{epoch}_{step}_a{self.accumulation_steps}.pth")
                         # torch.save(self.sampler_shadow.model.state_dict(),
                         #            f"{self.checkpoint_path}/sample_ckpt_{epoch}_{step}_a{self.accumulation_steps}_ema.pth")
+                        cleanup_directory(self.checkpoint_path, self.keep_count)
+                    
+                    if idx >= len(train_dataloader):
+                        break
 
             if (epoch + 1) % self.accu_scheduler_epochs == 0:
                 last_accu_steps = self.accumulation_steps
 
                 if self.update_accumulation_steps():
-                    self.train_lr = self.train_init_lr / self.accumulation_steps
+                    self.train_lr = self.train_init_lr #* math.sqrt(self.accumulation_steps)
                     last_log_steps = step
                     print(f"Update accumulation_steps: {self.accumulation_steps}, train_lr: {self.train_lr}")
 
@@ -135,7 +162,8 @@ class Trainer:
                     for param_group in self.optimizer.param_groups:
                         param_group["lr"] *= self.train_lr
             
-            self.epoch = epoch
+            self.epoch = epoch + 1
+            self.idx = 0
     
     def save(self, path):
         torch.save({
@@ -160,13 +188,17 @@ class Trainer:
         self.sampler.model.load_state_dict(model_dict)
         print("load pretrained weights!")
         
-        # load optimizer
-        if checkpoint["optimizer"]:
-            self.optimizer = torch.optim.AdamW(self.sampler.parameters(), lr=checkpoint["lr"])
-            self.optimizer.load_state_dict(checkpoint["optimizer"])
-        
         # load training info
         self.epoch = checkpoint["epoch"]
         self.step = checkpoint["step"]
         self.idx = checkpoint['idx']
         self.train_lr = checkpoint["lr"]
+        
+        self.accumulation_steps = min(2 ** (self.epoch // self.accu_scheduler_epochs), self.accu_max_steps)
+        self.train_lr = self.train_init_lr #* math.sqrt(self.accumulation_steps)
+        
+        # load optimizer
+        if checkpoint["optimizer"]:
+            self.optimizer = torch.optim.AdamW(self.sampler.parameters(), lr=self.train_lr)
+            self.optimizer.load_state_dict(checkpoint["optimizer"])
+            print("load pretrained optimizer!")
